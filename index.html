@@ -277,7 +277,7 @@
     // ---------- parties de la maison ----------
     var P = {};
     D.parties.forEach(function (x) {
-      P[x.id] = { id: x.id, z: x.z, rang: x.rang, coupeH: x.coupe, groupe: new THREE.Group(), mat: null, jour: null, nuit: null, vitres: [], glaces: [], arases: [], meshes: [], cartes: [], mats: [], tex: null, lum: "jour", coupeN: new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6), coupe: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), coupeA: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), charge: false };
+      P[x.id] = { id: x.id, z: x.z, rang: x.rang, coupeH: x.coupe, groupe: new THREE.Group(), mat: null, jour: null, nuit: null, vitres: [], glaces: [], arases: [], meshes: [], ecl: [], eclArases: [], cartes: [], mats: [], tex: null, lum: "jour", coupeN: new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6), coupe: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), coupeA: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), charge: false };
       scene.add(P[x.id].groupe);
     });
     var NIV = D.parties.filter(function (x) { return x.rang >= 0; }).map(function (x) { return P[x.id]; });
@@ -508,17 +508,65 @@
     draco.setDecoderPath("three/draco/");
     var lecteurGltf = new THREE.GLTFLoader();
     lecteurGltf.setDRACOLoader(draco);
+    function faireArase(o, n) {
+      o.material = new THREE.MeshBasicMaterial({ color: AJ.clone().lerp(AN, NUIT.value), clippingPlanes: [n.coupeA] }); o.position.y += 0.012; o.visible = false;
+      // trait fin sur le pourtour des murs coupés : la coupe se lit comme sur une maquette d'architecte
+      var trait = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 20), new THREE.LineBasicMaterial({ color: TRAIT_J.clone().lerp(TRAIT_N, NUIT.value), transparent: true, opacity: 0.55, clippingPlanes: [n.coupeA] }));
+      trait.position.y = 0.004; trait.renderOrder = 2; o.add(trait); TRAITS.push(trait);
+    }
+    // ---------- éclatée propre (eclatee_propre.py) : chaque niveau en version « maquette », coupée bas, sans déco ni objet tranché ----------
+    // géométrie seule : elle reprend la texture (jour, soir, téléphone) de sa partie ; les faces tournées vers dehors sont en teinte de maquette
+    var ECL = D.eclatee || { ids: [], haut: 1.25 };
+    function matEclatee(n) {
+      var mat = new THREE.MeshBasicMaterial({ map: n.tex, side: THREE.FrontSide, clippingPlanes: [n.coupe, n.coupeN] });
+      fonduNuit(mat, n, 1, "eclatee");
+      return mat;
+    }
+    function matMaquette(n) {
+      var mat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.FrontSide, clippingPlanes: [n.coupe, n.coupeN] });
+      mat.onBeforeCompile = function (s) {
+        s.uniforms.uNuitQ = NUIT; s.uniforms.uDecal = { value: n.groupe.position }; s.uniforms.uSolQ = { value: n.z };
+        s.vertexShader = "varying vec3 vMq;\nvarying vec3 vNq;\n" + s.vertexShader.replace("#include <project_vertex>",
+          "#include <project_vertex>\n vMq = (modelMatrix * vec4(transformed, 1.0)).xyz;\n vNq = mat3(modelMatrix) * normal;");
+        s.fragmentShader = s.fragmentShader.replace("void main() {", GLSL_MAQ + "void main() {").replace("#include <alphamap_fragment>", "#include <alphamap_fragment>\n diffuseColor.rgb = couleurMaq();");
+      };
+      mat.customProgramCacheKey = function () { return "maquette"; };
+      return mat;
+    }
+    function chargerEclatee(id, ensuite) {
+      var s = document.createElement("script"), cle = id + "e";
+      s.src = "niveau_" + cle + ".js";
+      s.onload = function () {
+        var b = atob(window.MAISON_NIVEAUX[cle]), octets = new Uint8Array(b.length);
+        for (var i = 0; i < b.length; i++) octets[i] = b.charCodeAt(i);
+        window.MAISON_NIVEAUX[cle] = null;
+        lecteurGltf.parse(octets.buffer, "", function (gltf) { installerEclatee(id, gltf); ensuite(); }, function () { ensuite(); });
+      };
+      s.onerror = function () { ensuite(); };
+      document.body.appendChild(s);
+    }
+    function installerEclatee(id, gltf) {
+      var n = P[id], liste = [];
+      gltf.scene.traverse(function (o) { if (o.isMesh) liste.push(o); });
+      liste.forEach(function (o) {
+        var p = n;
+        if (/Arase/.test(o.name)) { faireArase(o, n); n.eclArases.push(o); }
+        else if (/^Maq_/.test(o.name)) { o.material = matMaquette(n); n.ecl.push(o); }
+        else { p = P[o.name.replace(/^Ecl_/, "")]; if (!p || !p.mat) return; o.material = matEclatee(p); p.ecl.push(o); }
+        o.visible = false;
+        p.groupe.add(o);
+      });
+      n.eclPret = true;
+      appliquerMode();
+      toucher();
+    }
+    // le niveau est-il montré en éclatée propre ? éclatée : tous ; niveau ouvert : celui qu'on regarde (ceux du dessous restent entiers)
+    function enEclatee(n, ouvert, nv) { var b = P[n.id.replace(/m$/, "")]; return ouvert && b && b.eclPret && (mode === "explode" || n.rang === nv); }
     function installer(n, gltf, ensuite) {
       {
         gltf.scene.traverse(function (o) {
           if (!o.isMesh) return;
-          if (/Arase/.test(o.name)) {
-            o.material = new THREE.MeshBasicMaterial({ color: AJ.clone().lerp(AN, NUIT.value), clippingPlanes: [n.coupeA] }); o.position.y += 0.012; o.visible = false; n.arases.push(o);
-            // trait fin sur le pourtour des murs coupés : la coupe se lit comme sur une maquette d'architecte
-            var trait = new THREE.LineSegments(new THREE.EdgesGeometry(o.geometry, 20), new THREE.LineBasicMaterial({ color: TRAIT_J.clone().lerp(TRAIT_N, NUIT.value), transparent: true, opacity: 0.55, clippingPlanes: [n.coupeA] }));
-            trait.position.y = 0.004; trait.renderOrder = 2; o.add(trait); TRAITS.push(trait);
-            return;
-          }
+          if (/Arase/.test(o.name)) { faireArase(o, n); n.arases.push(o); return; }
           if (/_glace/.test(o.name)) { vraiMiroir(o, n); return; }
           if (/Vitrage|_vitre/.test(o.name)) {
             o.material = new THREE.MeshBasicMaterial({ color: 0xfff1df, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false, clippingPlanes: [n.coupe] });
@@ -681,7 +729,7 @@
       var mur = couleurMur();
       murVoisin();
       COQUES.forEach(function (c) { c.mur.material.color.copy(mur); });
-      NIV.forEach(function (n) { n.arases.forEach(function (o) { o.material.color.copy(AJ).lerp(AN, t); }); });
+      NIV.forEach(function (n) { n.arases.concat(n.eclArases).forEach(function (o) { o.material.color.copy(AJ).lerp(AN, t); }); });
       TRAITS.forEach(function (l) { l.material.color.copy(TRAIT_J).lerp(TRAIT_N, t); });
       NEIGE.u.uCouleur.value.setRGB(1 - 0.3 * t, 1 - 0.24 * t, 1 - 0.1 * t);
       NEIGE.u.uAlpha.value = 0.85 - 0.25 * t;
@@ -891,7 +939,12 @@
         n.vitres.forEach(function (o) { o.visible = !ouvert && !dehors; });
         n.glaces.forEach(function (g) { g.o.material = ouvert || dehors ? g.plat : g.reflet; });
         n.coupeN.constant = ouvert && n.rang === 3 ? 7.1 : 1e6;  // bas des chevrons de la suite, au nord : ils flotteraient seuls
-        n.arases.forEach(function (o) { o.visible = ouvert; });
+        var e_ = enEclatee(n, ouvert, nv);
+        n.meshes.forEach(function (o) { o.visible = !e_; });
+        n.ecl.forEach(function (o) { o.visible = e_; });
+        n.arases.forEach(function (o) { o.visible = ouvert && !e_; });
+        n.eclArases.forEach(function (o) { o.visible = e_; });
+        n.glaces.forEach(function (g) { g.o.visible = !e_; });
       });
       NEIGE.o.visible = neigeOn && !ouvert && !dedansIntro;  // jamais de neige dans le salon
       if (VOISIN) VOISIN.g.visible = ouvert;
@@ -1159,13 +1212,13 @@
       intro.auto += (autoVise - intro.auto) * Math.min(1, dt * 0.8);
       // élan du geste lâché : la descente continue puis ralentit doucement
       intro.cible = Math.max(0, Math.min(1, intro.cible + (intro.elan + intro.auto) * dt));
-      intro.elan *= Math.exp(-dt * 1.4);
+      intro.elan *= Math.exp(-dt * (TACTILE ? 1.6 : 1.4));
       // l'intérieur pas encore arrivé (connexion lente) : on attend devant la baie
       intro.attente = intro.porte !== null && !interieurPret() && intro.cible > intro.porte - 0.01;
       if (intro.attente) { intro.cible = intro.porte - 0.01; intro.elan = 0; }
       if (intro.cible <= 0 || intro.cible >= 1) intro.elan = 0;
       // la caméra suit le geste en souplesse : jamais d'à-coup, même avec une molette crantée
-      intro.k += (intro.cible - intro.k) * (1 - Math.exp(-dt * 2.2));
+      intro.k += (intro.cible - intro.k) * (1 - Math.exp(-dt * (TACTILE ? 1.8 : 2.2)));
       if (intro.cible >= 1 && intro.k > 0.9992) intro.k = 1;
       // caméra presque immobile : le reste de la maison peut se charger sans à-coup visible
       intro.calme = !intro.doigt && Math.abs(intro.cible - intro.k) < 0.002 && (intro.auto < 1e-4 || intro.attente) && t - intro.geste > 500;
@@ -1248,7 +1301,8 @@
     window.addEventListener("pointermove", function (e) {
       var g = intro && intro.doigt;
       if (!g || e.pointerId !== g.id) return;
-      var t = performance.now(), dk = (g.y - e.clientY) / (innerHeight * 7);
+      // au doigt (Gaston, 2026-11-09) : un balayage d'écran fait 1/11 du trajet au lieu de 1/7, pour prendre le temps de voir les pièces
+      var t = performance.now(), dk = (g.y - e.clientY) / (innerHeight * (TACTILE ? 11 : 7));
       g.v = g.v * 0.6 + dk / (Math.max(8, t - g.t) / 1000) * 0.4;  // vitesse du doigt, lissée
       g.y = e.clientY; g.t = t;
       pousser(dk);
@@ -1257,7 +1311,7 @@
       var g = intro && intro.doigt;
       if (!g || e.pointerId !== g.id) return;
       intro.doigt = null; intro.geste = performance.now();
-      if (performance.now() - g.t < 90) intro.elan = Math.max(-0.22, Math.min(0.22, g.v));  // doigt lâché en mouvement : il garde son élan
+      if (performance.now() - g.t < 90) { var m = TACTILE ? 0.13 : 0.22; intro.elan = Math.max(-m, Math.min(m, g.v)); }  // doigt lâché en mouvement : il garde son élan
     }
     window.addEventListener("pointerup", lacher);
     window.addEventListener("pointercancel", lacher);
@@ -1636,7 +1690,7 @@
           }
           // en maison ouverte, seul le niveau regardé est coupé : ceux du dessous montent jusqu'au plancher suivant
           // arrivée, près de la baie et dedans : les pièces entières, plafonds compris (vues de loin, chaque niveau s'arrête au plancher du dessus)
-          n.coupe.constant = intro && intro.proche ? 1e6 : (ec || n.rang >= nv || zDessus[n.rang] === undefined ? n.z + n.coupeH : zDessus[n.rang]) + n.groupe.position.y;
+          n.coupe.constant = intro && intro.proche ? 1e6 : (enEclatee(n, true, nv) ? n.z + ECL.haut : ec || n.rang >= nv || zDessus[n.rang] === undefined ? n.z + n.coupeH : zDessus[n.rang]) + n.groupe.position.y;
           n.coupeA.constant = n.coupe.constant + 0.03;
         });
         COQUES.forEach(function (c) {
@@ -1670,7 +1724,7 @@
     setInterval(function () {  // vol terminé, vue au repos : le reste de la maison se charge (minuterie : marche aussi page en arrière-plan)
       if (reprise && (!intro || intro.calme) && !vol && !manip && !tween && !appui) { var r_ = reprise; reprise = null; r_(); }
     }, 400);
-    var ordre = D.ordre.map(function (k) { return P[k]; }), total = ordre.length, premiers = 0;
+    var ordre = D.ordre.map(function (k) { return P[k]; }), total = ordre.length, premiers = 0, fileEcl = ECL.ids.slice();
     (function suite() {
       var reste = ordre.length;
       document.getElementById("progres").textContent = reste && premiers ? "Chargement " + (total - reste + 1) + " / " + total : "";
@@ -1688,9 +1742,10 @@
           if (D.intro) lancerIntro();
         });
       }
-      if (!reste) return;  // la lumière du soir ne se charge qu'au premier clic sur ☾ (en silence, elle donnait des à-coups pendant la visite)
+      if (!reste && !fileEcl.length) return;  // la lumière du soir ne se charge qu'au premier clic sur ☾ (en silence, elle donnait des à-coups pendant la visite)
       if ((intro && !intro.calme) || vol || manip || tween || appui) { reprise = suite; return; }  // pendant un vol, on ne charge rien : chaque partie décodée figerait l'image un instant
-      charger(ordre.shift(), function () { setTimeout(suite, 120); });
+      if (reste) charger(ordre.shift(), function () { setTimeout(suite, 120); });
+      else chargerEclatee(fileEcl.shift(), function () { setTimeout(suite, 120); });  // puis l'éclatée propre, niveau par niveau
     })();
     window.__maison = { fp: fp, aller: aller, ambiance: ambiance, essai: essai, avancer: avancer, solSous: solSous, libreA: libreA, P: P, touches: touches, camera: camera, controles: controles, ESCALIER: ESCALIER, toucher: toucher,
       MOBILE: MOBILE, memoire: function () {  // estimation de la mémoire graphique des textures vivantes (Mo, mipmaps comprises)
