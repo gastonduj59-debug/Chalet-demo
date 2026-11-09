@@ -246,6 +246,14 @@
     document.getElementById("infoBtn").onclick = function () { document.getElementById("brand").classList.toggle("ouvert"); };
 
     var hote = document.getElementById("scene");
+    // téléphone et tablette : lumières cuites en 2048 px (fichiers _m, voir bibliotheque/scripts/version_mobile.py) et une seule lumière,
+    // jour ou soir, en mémoire à la fois ; sinon Safari ferme l'onglet vers 1 Go de mémoire graphique. ?mobile=1 ou 0 pour forcer
+    var MOBILE = (function () {
+      var q = /[?&]mobile=([01])/.exec(location.search);
+      if (q) return q[1] === "1";
+      return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform)) || Math.min(screen.width, screen.height) < 768;
+    })();
+    function mob(f) { return MOBILE ? f.replace(/\.jpg$/, "_m.jpg") : f; }
     var rendu = new THREE.WebGLRenderer({ antialias: true });
     rendu.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     rendu.outputEncoding = THREE.sRGBEncoding;
@@ -269,14 +277,14 @@
     // ---------- parties de la maison ----------
     var P = {};
     D.parties.forEach(function (x) {
-      P[x.id] = { id: x.id, z: x.z, rang: x.rang, coupeH: x.coupe, groupe: new THREE.Group(), mat: null, jour: null, nuit: null, vitres: [], glaces: [], arases: [], meshes: [], cartes: [], coupeN: new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6), coupe: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), coupeA: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), charge: false };
+      P[x.id] = { id: x.id, z: x.z, rang: x.rang, coupeH: x.coupe, groupe: new THREE.Group(), mat: null, jour: null, nuit: null, vitres: [], glaces: [], arases: [], meshes: [], cartes: [], mats: [], tex: null, lum: "jour", coupeN: new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6), coupe: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), coupeA: new THREE.Plane(new THREE.Vector3(0, -1, 0), 1e6), charge: false };
       scene.add(P[x.id].groupe);
     });
     var NIV = D.parties.filter(function (x) { return x.rang >= 0; }).map(function (x) { return P[x.id]; });
     var NB_NIV = 1 + Math.max.apply(null, NIV.filter(function (n) { return n.id !== "toit"; }).map(function (n) { return n.rang; }));
 
     function fond(uri) { var t = chargeur.load(uri); t.encoding = THREE.sRGBEncoding; return t; }
-    var fonds = { soir: fond(D.fond_nuit), ext: fond(D.fond_ext) };
+    var fonds = { soir: fond(mob(D.fond_nuit)), ext: fond(mob(D.fond_ext)) };
     fonds.jour = fonds.ext;
     // éclatée en escalier : chaque niveau s'écarte de ce pas (est, nord, haut) multiplié par son rang ; vers le côté dégagé du terrain
     // écran en hauteur (téléphone) : l'escalier se redresse pour tenir dans l'image
@@ -311,8 +319,9 @@
     // jour / soir : chaque matière garde ses deux lumières cuites et passe de l'une à l'autre en fondu (NUIT va de 0 à 1)
     var NUIT = { value: 0 }, nuitCible = 0;
     function fonduNuit(mat, n, sombre, cle) {  // n : la partie dont la lumière du soir est prise (elle arrive après coup, voir chargerNuits)
-      var avant = mat.onBeforeCompile, carte = { value: n.nuit || n.jour }, sb = { value: sombre };
+      var avant = mat.onBeforeCompile, carte = { value: n.nuit || n.tex }, sb = { value: sombre };
       n.cartes.push(carte);
+      n.mats.push(mat);
       mat.userData.nuit = carte;
       mat.onBeforeCompile = function (s, r) {
         s.uniforms.uNuit = NUIT; s.uniforms.uNuitMap = carte; s.uniforms.uSombre = sb;
@@ -327,7 +336,7 @@
     // (au sud, le voisin est retiré ; au N2, le pignon, pour voir le séjour ; au N3, tout ce qui est à l'ouest de la suite)
     var COQUES = [], VOISIN = null;
     function preparerVoisin(n) {  // l'éclatée reste dans le décor : la maison voisine reste en place, coupée au mur mitoyen
-      var mat = new THREE.MeshBasicMaterial({ map: n.jour, side: THREE.DoubleSide, clippingPlanes: [new THREE.Plane(new THREE.Vector3(0, 0, 1), 0.24)] });
+      var mat = new THREE.MeshBasicMaterial({ map: n.tex, side: THREE.DoubleSide, clippingPlanes: [new THREE.Plane(new THREE.Vector3(0, 0, 1), 0.24)] });
       mat.onBeforeCompile = function (s) {  // le dessous du toit coupé, resté noir au calcul, s'efface ; voilée comme le décor
         s.uniforms.uVoile = VOILE; s.uniforms.uNuitQ = NUIT;
         s.fragmentShader = "uniform float uVoile;\nuniform float uNuitQ;\n" + s.fragmentShader.replace("#include <map_fragment>", "#include <map_fragment>\n if (diffuseColor.r + diffuseColor.g + diffuseColor.b < 0.035) discard;")
@@ -358,7 +367,7 @@
         var plans = [haut, bas, new THREE.Plane(new THREE.Vector3(0, 0, -1), -0.29)];
         var ouest = new THREE.Plane(new THREE.Vector3(1, 0, 0), -d[1]);
         plans.push(ouest, new THREE.Plane(new THREE.Vector3(0, 0, 1), d[2]));  // banc, barrière et dalle restent dehors, avec les alentours
-        var mat = new THREE.MeshBasicMaterial({ map: n.jour, side: THREE.FrontSide, clippingPlanes: plans, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+        var mat = new THREE.MeshBasicMaterial({ map: n.tex, side: THREE.FrontSide, clippingPlanes: plans, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
         mat.onBeforeCompile = function (s) {  // ce qui reste noir est l'intérieur des volumes de façade, fermé pendant le calcul de la lumière
           s.fragmentShader = s.fragmentShader.replace("#include <map_fragment>", "#include <map_fragment>\n if (diffuseColor.r + diffuseColor.g + diffuseColor.b < 0.035) discard;");
         };
@@ -386,7 +395,7 @@
       o.updateWorldMatrix(true, false);
       var nor = new THREE.Vector3(), centre = new THREE.Vector3();
       o.geometry.computeBoundingBox();
-      var cible = new THREE.WebGLRenderTarget(1024, 1024, { samples: 4 });
+      var cible = MOBILE ? new THREE.WebGLRenderTarget(512, 512) : new THREE.WebGLRenderTarget(1024, 1024, { samples: 4 });
       var tm = new THREE.Matrix4(), cam = new THREE.PerspectiveCamera();
       var reflet = new THREE.ShaderMaterial({
         uniforms: { tDiffuse: { value: cible.texture }, textureMatrix: { value: tm } },
@@ -517,7 +526,8 @@
             n.vitres.push(o);
             return;
           }
-          n.jour = o.material.map;
+          n.jour = n.tex = o.material.map;
+          n.flip = n.jour.flipY;
           n.jour.anisotropy = rendu.capabilities.getMaxAnisotropy();
           n.mat = new THREE.MeshBasicMaterial({ map: n.jour, side: THREE.DoubleSide, clippingPlanes: [n.coupe, n.coupeN] });
           n.mat.onBeforeCompile = function (s) {  // vues ouvertes : les faces restées tout à fait noires sont des dos de mur, jamais vus en visite (seuil bas : plus large, il trouait carrelages et pierres sombres)
@@ -534,17 +544,21 @@
         });
         n.groupe.add(gltf.scene);
         if (n.jour) rendu.initTexture(n.jour);  // envoi à la carte graphique tout de suite, vue au repos : sinon il fige la première image où l'on bouge
-        n.charge = true;
-        if (n.id === "ext") preparerCoques(n);
-        if (nuitVoulue) chargerNuit(n);
-        appliquerMode();
-        toucher();
-        ensuite();
+        if (MOBILE && n.jour) liberer(n.jour);
+        var fin = function () {
+          n.charge = true;
+          if (n.id === "ext") preparerCoques(n);
+          if (nuitVoulue) chargerNuit(n);
+          appliquerMode();
+          toucher();
+          ensuite();
+        };
+        if (MOBILE && grande(n) && lumiereVoulue === "soir") poserLumiere(n, "soir", fin); else fin();  // arrivée en plein soir : la partie n'apparaît qu'éclairée
       }
     }
     function charger(n, ensuite) {  // glb compressé emballé dans un petit script (les hébergements de pages ne servent pas les .glb)
       var s = document.createElement("script");
-      s.src = "niveau_" + n.id + ".js";
+      s.src = "niveau_" + n.id + (MOBILE ? "_m" : "") + ".js";
       s.onload = function () {
         var b = atob(window.MAISON_NIVEAUX[n.id]), octets = new Uint8Array(b.length);
         for (var i = 0; i < b.length; i++) octets[i] = b.charCodeAt(i);
@@ -557,7 +571,7 @@
     // une partie après l'autre (un téléphone ou un petit serveur n'aiment pas quatorze demandes à la fois) ; une demande ratée est relancée
     var nuitVoulue = false, nuitsEnAttente = 0, fileNuits = [], nuitEnRoute = false;
     function chargerNuit(n) {
-      if (n.nuit || n.nuitEnCours || !n.jour) return;
+      if (n.nuit || n.nuitEnCours || !n.jour || (MOBILE && grande(n))) return;
       n.nuitEnCours = true;
       nuitsEnAttente++;
       fileNuits.push(n);
@@ -574,7 +588,7 @@
         n.cartes.forEach(function (c) { c.value = t; });
         nuitsEnAttente--;
         nuitEnRoute = false;
-        if (!nuitsEnAttente) { attenteSoir(false); if (ambianceActive === "soir") { nuitCible = 1; toucher(); } }  // le fondu part quand tout est là
+        if (!nuitsEnAttente && !MOBILE) { attenteSoir(false); if (ambianceActive === "soir") { nuitCible = 1; toucher(); } }  // le fondu part quand tout est là
         nuitSuivante();
       }, undefined, function () { nuitEnRoute = false; fileNuits.push(n); setTimeout(nuitSuivante, 1500); });
     }
@@ -586,8 +600,73 @@
       matFondNuit.map = fonds.soir;
       matFond.needsUpdate = matFondNuit.needsUpdate = true;
     }
+    // ---------- téléphone : une seule lumière en mémoire ; on télécharge l'autre, on fige l'image, on échange partie par partie, on rend la main en fondu ----------
+    function grande(n) { return n.jour && n.jour.image && n.jour.image.width > 256; }  // les arbres (16 px) gardent les deux lumières, comme sur ordinateur
+    function liberer(t) {  // une fois sur la carte graphique, l'image décodée n'a plus d'usage : 16 Mo rendus par texture
+      var im = t.image;
+      if (!im || !im.width) return;
+      var w = im.width, h = im.height;
+      if (im.close) im.close();
+      t.image = { width: w, height: h };
+    }
+    var lumiereVoulue = "jour", lumiereEnRoute = false;
+    function fichierLumiere(n, nom) { return "niveau_" + n.id + (nom === "soir" ? "_nuit" : "_jour") + "_m.jpg"; }
+    function telecharger(n, nom) {
+      if (!n.blob || n.blob.nom !== nom) n.blob = { nom: nom, p: fetch(fichierLumiere(n, nom)).then(function (r) { if (!r.ok) throw new Error(r.status); return r.blob(); }) };
+      var b = n.blob;
+      b.p.catch(function () { if (n.blob === b) n.blob = null; });
+      return b.p;
+    }
+    function poserLumiere(n, nom, ensuite) {
+      n.lumEnCours = true;
+      var rater = function () { n.blob = null; setTimeout(function () { poserLumiere(n, nom, ensuite); }, 1500); };
+      telecharger(n, nom).then(function (b) {
+        var url = URL.createObjectURL(b);
+        chargeur.load(url, function (t) {
+          URL.revokeObjectURL(url);
+          n.blob = null;
+          t.encoding = THREE.sRGBEncoding; t.flipY = n.flip; t.anisotropy = rendu.capabilities.getMaxAnisotropy();
+          rendu.initTexture(t);
+          liberer(t);
+          var vieux = n.tex;
+          n.tex = t;
+          n.mats.forEach(function (m) { m.map = t; });
+          n.cartes.forEach(function (c) { c.value = t; });
+          if (vieux && vieux !== t) vieux.dispose();
+          n.lum = nom; n.lumEnCours = false;
+          toucher();
+          ensuite();
+        }, undefined, rater);
+      }, rater);
+    }
+    function aEchanger(nom) { return Object.keys(P).map(function (k) { return P[k]; }).filter(function (n) { return n.charge && grande(n) && n.lum !== nom && !n.lumEnCours; }); }
+    function lumiereMobile(nom) {
+      lumiereVoulue = nom;
+      if (nom === "soir") chargerNuits();
+      if (lumiereEnRoute) return;  // un passage est en cours : il enchaînera sur le dernier choix
+      var liste = aEchanger(nom);
+      if (!liste.length) { nuitCible = NUIT.value = nom === "soir" ? 1 : 0; appliquerNuit(); attenteSoir(false); toucher(); return; }
+      lumiereEnRoute = true;
+      attenteSoir(true);
+      Promise.all(liste.map(function (n) { return telecharger(n, nom).catch(function () {}); })).then(function () {
+        figer(0, true);  // l'image d'avant reste posée pendant l'échange (environ une seconde)
+        (function suivante() {
+          var reste = aEchanger(nom);
+          if (reste.length) { poserLumiere(reste[0], nom, suivante); return; }
+          if (Object.keys(P).some(function (k) { return P[k].lumEnCours; })) { setTimeout(suivante, 100); return; }
+          nuitCible = NUIT.value = nom === "soir" ? 1 : 0;
+          appliquerNuit();
+          lumiereEnRoute = false;
+          attenteSoir(false);
+          effacerFige(0.9);
+          toucher();
+          if (lumiereVoulue !== nom) lumiereMobile(lumiereVoulue);
+        })();
+      });
+    }
     function ambiance(nom) {  // le passage lui-même se fait image par image dans la boucle (environ 2 s)
       ambianceActive = nom;
+      if (MOBILE) { lumiereMobile(nom); majFond(); marquer(); toucher(); return; }
       if (nom === "soir") { chargerNuits(); attenteSoir(nuitsEnAttente > 0); }
       nuitCible = nom === "soir" && !nuitsEnAttente ? 1 : 0;  // lumière du soir encore en route : le fondu attend qu'elle arrive
       majFond();
@@ -1021,14 +1100,15 @@
     }
     function cacherGuide() { if (intro) intro.guide = false; guide.classList.remove("on"); }
     // passage de la baie : l'image d'avant reste posée un instant et s'efface (0,35 s), le temps que la maison passe de « vue de dehors » à « vue de dedans »
-    function figer(duree) {
+    function figer(duree, tenir) {  // tenir : l'image reste jusqu'à effacerFige()
       rendu.render(scene, camera);
       enchaine.width = rendu.domElement.width; enchaine.height = rendu.domElement.height;
       ctxEnchaine.drawImage(rendu.domElement, 0, 0);
       enchaine.style.transition = "none"; enchaine.style.opacity = 1;
       void enchaine.offsetWidth;
-      enchaine.style.transition = "opacity " + duree + "s ease-out"; enchaine.style.opacity = 0;
+      if (!tenir) effacerFige(duree);
     }
+    function effacerFige(duree) { enchaine.style.transition = "opacity " + duree + "s ease-out"; enchaine.style.opacity = 0; }
     // dehors : la façade et la toiture, l'intérieur coupé à ses murs ; dedans : comme en visite. Sans recompiler aucun programme (pas d'à-coup)
     var INTERIEUR_C = INTERIEUR.map(function (pl) { return pl.constant; });
     function basculer(dedans) {
@@ -1613,6 +1693,14 @@
       charger(ordre.shift(), function () { setTimeout(suite, 120); });
     })();
     window.__maison = { fp: fp, aller: aller, ambiance: ambiance, essai: essai, avancer: avancer, solSous: solSous, libreA: libreA, P: P, touches: touches, camera: camera, controles: controles, ESCALIER: ESCALIER, toucher: toucher,
+      MOBILE: MOBILE, memoire: function () {  // estimation de la mémoire graphique des textures vivantes (Mo, mipmaps comprises)
+        var vus = new Set(), mo = 0;
+        function t(x) { if (x && x.isTexture && !vus.has(x) && x.image) { vus.add(x); mo += x.image.width * x.image.height * 4 * 1.33 / 1048576; } }
+        scene.traverse(function (o) { [].concat(o.material || []).forEach(function (m) { t(m.map); if (m.uniforms) Object.keys(m.uniforms).forEach(function (k) { t(m.uniforms[k].value); }); }); });
+        Object.keys(P).forEach(function (k) { P[k].cartes.forEach(function (c) { t(c.value); }); P[k].mats.forEach(function (m) { t(m.map); }); });
+        t(fonds.ext); t(fonds.soir);
+        return { textures: vus.size, Mo: Math.round(mo), info: rendu.info.memory.textures, pr: rendu.getPixelRatio() };
+      },
       rendu: rendu, scene: scene, lueur: lueur, NUIT: NUIT, VOILE: VOILE, appliquerNuit: appliquerNuit, majFond: majFond, redim: redim, intro: function () { return intro; },
       poseIntro: function (k) { intro.k = intro.cible = k; intro.elan = intro.auto = 0; intro.prec = performance.now(); etapeIntro(); rendu.render(scene, camera); return dedansIntro; },
       vol: function () { return vol; },
